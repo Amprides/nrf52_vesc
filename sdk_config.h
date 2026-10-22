@@ -42,6 +42,12 @@
 
 #ifndef SDK_CONFIG_H
 #define SDK_CONFIG_H
+
+#if BLE_BMS_ENABLED
+#ifndef BLE_DB_DISCOVERY_ENABLED
+#define BLE_DB_DISCOVERY_ENABLED 1
+#endif
+#endif
 // <<< Use Configuration Wizard in Context Menu >>>\n
 #ifdef USE_APP_CONFIG
 #include "app_config.h"
@@ -150,7 +156,11 @@
 // <i> Enable/disable central-specific Peer Manager functionality.
 
 #ifndef PM_CENTRAL_ENABLED
+#if BLE_BMS_ENABLED
+#define PM_CENTRAL_ENABLED 1
+#else
 #define PM_CENTRAL_ENABLED 0
+#endif
 #endif
 
 // <q> PM_SERVICE_CHANGED_ENABLED  - Enable/disable the service changed management for GATT server in Peer Manager.
@@ -7567,7 +7577,11 @@
 // <e> NRF_LOG_ENABLED - nrf_log - Logger
 //==========================================================
 #ifndef NRF_LOG_ENABLED
+#if BLE_BMS_ENABLED
+#define NRF_LOG_ENABLED 1
+#else
 #define NRF_LOG_ENABLED 0
+#endif
 #endif
 // <h> Log message pool - Configuration of log message pool
 
@@ -11107,14 +11121,22 @@
 
 // <o> NRF_SDH_BLE_CENTRAL_LINK_COUNT - Maximum number of central links. 
 #ifndef NRF_SDH_BLE_CENTRAL_LINK_COUNT
+#if BLE_BMS_ENABLED
+#define NRF_SDH_BLE_CENTRAL_LINK_COUNT 1
+#else
 #define NRF_SDH_BLE_CENTRAL_LINK_COUNT 0
+#endif
 #endif
 
 // <o> NRF_SDH_BLE_TOTAL_LINK_COUNT - Total link count. 
 // <i> Maximum number of total concurrent connections using the default configuration.
 
 #ifndef NRF_SDH_BLE_TOTAL_LINK_COUNT
+#if BLE_BMS_ENABLED
+#define NRF_SDH_BLE_TOTAL_LINK_COUNT 2
+#else
 #define NRF_SDH_BLE_TOTAL_LINK_COUNT 1
+#endif
 #endif
 
 // <o> NRF_SDH_BLE_GAP_EVENT_LENGTH - GAP event length. 

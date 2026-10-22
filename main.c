@@ -40,6 +40,13 @@
 #include "bsp_btn_ble.h"
 #include "nrf_delay.h"
 #include "storage.h"
+#if BLE_BMS_ENABLED
+#include "ble_bms/ble_bms_radio.h"
+#include "ble_bms/ble_bms_wire.h"
+#include "nrf_log.h"
+#include "nrf_log_ctrl.h"
+#include "nrf_log_default_backends.h"
+#endif
 #include "nrf_ble_lesc.h"
 #include "peer_manager.h"
 #include "peer_manager_handler.h"
@@ -195,6 +202,45 @@ static pm_peer_id_t m_peer_to_be_deleted = PM_PEER_ID_INVALID;
 #endif
 #endif
 
+#if (defined(BLE_BMS_DEVKIT) || defined(BLE_BMS_TRONIC_250R)) && !BLE_BMS_ENABLED
+#error BLE BMS board profiles require make BLE_BMS=1
+#endif
+
+// Explicit DK test profile; this does not identify the installed Tronic wiring.
+#ifdef BLE_BMS_DEVKIT
+#undef UART_RX
+#undef UART_TX
+#undef UART_TX_DISABLED
+#undef LED_PIN
+#define UART_RX 8
+#define UART_TX 6
+#define UART_TX_DISABLED 28
+#define LED_PIN 13
+#endif
+
+// Tronic 250R verified UART routing: RX=P0.06, TX=P0.05, 115200.
+// No LED/alternate-TX wiring has been established on the HOLYIOT module.
+#ifdef BLE_BMS_TRONIC_250R
+#include "ble_bms/tronic_pins.h"
+#if defined(BLE_BMS_DEVKIT) || !defined(NRF52840_XXAA)
+#error Tronic profile requires an nRF52840 and cannot be combined with the DK profile
+#endif
+#undef UART_RX
+#undef UART_TX
+#undef UART_TX_DISABLED
+#undef LED_PIN
+#undef LED_ON
+#undef LED_OFF
+#undef DEVICE_NAME
+#define UART_RX BLE_BMS_TRONIC_RX
+#define UART_TX BLE_BMS_TRONIC_TX
+#define UART_TX_DISABLED BLE_BMS_TRONIC_UNUSED_PIN
+#define LED_PIN BLE_BMS_TRONIC_UNUSED_PIN
+#define LED_ON() ((void)0)
+#define LED_OFF() ((void)0)
+#define DEVICE_NAME "250R beta"
+#endif
+
 // Alternative inverted LED pin
 #ifdef LED_PIN2_INV
 #undef LED_ON
@@ -327,6 +373,9 @@ static void usbd_user_ev_handler(app_usbd_event_type_t event) {
 #endif
 
 static void pm_evt_handler(pm_evt_t const * p_evt) {
+#if BLE_BMS_ENABLED
+	if (p_evt->conn_handle != BLE_CONN_HANDLE_INVALID && p_evt->conn_handle != m_conn_handle) return;
+#endif
 	ret_code_t err_code;
 
 	pm_handler_on_pm_evt(p_evt);
@@ -494,6 +543,9 @@ static void on_adv_evt(ble_adv_evt_t ble_adv_evt) {
 }
 
 static void ble_evt_handler(ble_evt_t const * p_ble_evt, void * p_context) {
+#if BLE_BMS_ENABLED
+	if (ble_bms_radio_event(p_ble_evt)) return;
+#endif
 	if (m_config.pin_set) {
 		pm_handler_secure_on_connection(p_ble_evt);
 	}
@@ -560,10 +612,15 @@ static void ble_stack_init(void) {
 	// Configure the BLE stack using the default settings.
 	// Fetch the start address of the application RAM.
 	uint32_t ram_start = 0;
-	nrf_sdh_ble_default_cfg_set(APP_BLE_CONN_CFG_TAG, &ram_start);
+#if BLE_BMS_ENABLED
+	APP_ERROR_CHECK(nrf_sdh_ble_default_cfg_set(APP_BLE_CONN_CFG_TAG, &ram_start));
 
 	// Enable BLE stack.
+	APP_ERROR_CHECK(nrf_sdh_ble_enable(&ram_start));
+#else
+	nrf_sdh_ble_default_cfg_set(APP_BLE_CONN_CFG_TAG, &ram_start);
 	nrf_sdh_ble_enable(&ram_start);
+#endif
 
 	// Register a handler for BLE events.
 	NRF_SDH_BLE_OBSERVER(m_ble_observer, APP_BLE_OBSERVER_PRIO, ble_evt_handler, NULL);
@@ -591,10 +648,16 @@ void uart_event_handle(app_uart_evt_t * p_event) {
 	} break;
 
 	case APP_UART_COMMUNICATION_ERROR:
+#if BLE_BMS_ENABLED
+        ble_bms_radio_uart_error(p_event->data.error_communication);
+#endif
 //		m_uart_error = true;
 		break;
 
 	case APP_UART_FIFO_ERROR:
+#if BLE_BMS_ENABLED
+        ble_bms_radio_uart_error(p_event->data.error_code);
+#endif
 //		m_uart_error = true;
 		break;
 
@@ -669,7 +732,9 @@ static void set_enabled(bool en) {
 		app_uart_close();
 		m_uart_comm_params.tx_pin_no = UART_TX;
 		uart_init();
+#if UART_TX_DISABLED != 0xFFFFFFFFu
 		nrf_gpio_cfg_default(UART_TX_DISABLED);
+#endif
 	} else {
 		app_uart_close();
 		m_uart_comm_params.tx_pin_no = UART_TX_DISABLED;
@@ -680,7 +745,12 @@ static void set_enabled(bool en) {
 
 static void uart_send_buffer(unsigned char *data, unsigned int len) {
 	for (int i = 0;i < len;i++) {
+#if BLE_BMS_ENABLED
+		uint32_t err = app_uart_put(data[i]);
+		if (err != NRF_SUCCESS) ble_bms_radio_uart_error(err);
+#else
 		app_uart_put(data[i]);
+#endif
 	}
 }
 
@@ -717,6 +787,10 @@ static void ble_send_buffer(unsigned char *data, unsigned int len) {
 }
 
 static void process_packet_ble(unsigned char *data, unsigned int len) {
+#if BLE_BMS_ENABLED
+    // A phone must not forge radio notifications/ACKs on the controller link.
+    if (bb_namespace(data,len) && (!bb_valid(data,len) || !bb_tool_request(data[4]))) return;
+#endif
 	if (data[0] == COMM_ERASE_NEW_APP ||
 			data[0] == COMM_WRITE_NEW_APP_DATA ||
 			data[0] == COMM_ERASE_NEW_APP_ALL_CAN ||
@@ -732,6 +806,9 @@ static void process_packet_ble(unsigned char *data, unsigned int len) {
 }
 
 static void process_packet_vesc(unsigned char *data, unsigned int len) {
+#if BLE_BMS_ENABLED
+	if (ble_bms_radio_packet(data, len)) return;
+#endif
 	if (data[0] == COMM_EXT_NRF_ESB_SET_CH_ADDR) {
 		esb_timeslot_set_ch_addr(data[1], data[2], data[3], data[4]);
 	} else if (data[0] == COMM_EXT_NRF_ESB_SEND_DATA) {
@@ -885,7 +962,9 @@ static void go_to_sleep(void) {
 	app_timer_stop_all();
 	esb_timeslot_sd_stop();
 
+#if LED_PIN != 0xFFFFFFFFu
 	nrf_gpio_cfg_default(LED_PIN);
+#endif
 	nrf_gpio_cfg_default(UART_RX);
 	nrf_gpio_cfg_default(UART_TX);
 
@@ -927,7 +1006,9 @@ static void go_to_sleep(void) {
 #endif
 
 int main(void) {
+#if LED_PIN != 0xFFFFFFFFu
 	nrf_gpio_cfg_output(LED_PIN);
+#endif
 
 #ifdef LED_PIN2_INV
 	nrf_gpio_cfg_output(LED_PIN2_INV);
@@ -960,13 +1041,29 @@ int main(void) {
 	NRF_WDT->RREN |= WDT_RREN_RR0_Msk;
 	NRF_WDT->TASKS_START = 1;
 
+#if BLE_BMS_ENABLED
+	APP_ERROR_CHECK(NRF_LOG_INIT(NULL));
+	NRF_LOG_DEFAULT_BACKENDS_INIT();
+    extern void ble_bms_fault_report(void);
+    ble_bms_fault_report();
+    NRF_LOG_INFO("Boot BLE BMS v1 UART RX=%u TX=%u",UART_RX,UART_TX);NRF_LOG_FLUSH();
+#endif
 	storage_init();
+#if BLE_BMS_ENABLED
+    NRF_LOG_INFO("Storage ready");NRF_LOG_FLUSH();
+#endif
 	uart_init();
 	app_timer_init();
 	nrf_pwr_mgmt_init();
 	ble_stack_init();
+#if BLE_BMS_ENABLED
+    NRF_LOG_INFO("SoftDevice ready");NRF_LOG_FLUSH();
+#endif
 	gap_params_init();
 	gatt_init();
+#if BLE_BMS_ENABLED
+	ble_bms_radio_init();
+#endif
 	services_init();
 	advertising_init();
 	conn_params_init();
@@ -986,8 +1083,15 @@ int main(void) {
 	app_timer_create(&m_nrf_timer, APP_TIMER_MODE_SINGLE_SHOT, nrf_timer_handler);
 	app_timer_start(m_nrf_timer, APP_TIMER_TICKS(1200), NULL);
 
+#if !BLE_BMS_ENABLED
 	esb_timeslot_init(esb_timeslot_data_handler);
 	esb_timeslot_sd_start();
+#else
+	// The legacy ESB timeslot scheduler asserts S140 when scanning starts.
+	// BLE BMS builds select central + peripheral BLE instead of ESB remotes;
+	// this radio scheduling policy applies to every board, not just Tronic.
+	(void)esb_timeslot_data_handler;
+#endif
 
 #if defined(NRF52840_XXAA) && USE_USB
 	app_usbd_power_events_enable();
@@ -1007,6 +1111,10 @@ int main(void) {
 			m_uart_error = false;
 		}
 
+#if BLE_BMS_ENABLED
+		ble_bms_radio_tick();
+		NRF_LOG_PROCESS();
+#endif
 		uint8_t byte;
 		while (app_uart_get(&byte) == NRF_SUCCESS) {
 			packet_process_byte(byte, PACKET_VESC);

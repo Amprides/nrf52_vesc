@@ -1,5 +1,15 @@
 _build
+_build_bms
 .cproject
 .project
 .settings
 hex/*
+
+_build_devkit
+_build_tronic250r
+_build_sim_*
+
+# All explicitly selected build profiles, including stock comparison outputs.
+_build_*/
+__pycache__/
+*.pyc

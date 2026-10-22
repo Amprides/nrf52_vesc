@@ -1,8 +1,29 @@
 # Compile for NRF52832, otherwise for NRF52840
 IS_52832 ?= 0
 
+# Keep every upstream radio profile unchanged unless BLE BMS is requested.
+BLE_BMS ?= 0
+ifeq ($(BLE_BMS),1)
+ifeq ($(IS_52832),1)
+$(error BLE_BMS=1 currently requires nRF52840 (IS_52832=0); nRF52832 needs a separately validated SoftDevice/RAM profile)
+endif
+CFLAGS += -DBLE_BMS_ENABLED=1
+else ifneq ($(BLE_BMS),0)
+$(error BLE_BMS must be 0 or 1)
+endif
+
 PROJECT_NAME     := vesc_ble_uart
+ifeq ($(BLE_BMS),1)
+OUTPUT_DIRECTORY := _build_bms
+else
 OUTPUT_DIRECTORY := _build
+endif
+
+ifeq ($(BLE_BMS),1)
+ifeq ($(abspath $(OUTPUT_DIRECTORY)),$(abspath _build))
+$(error BLE_BMS=1 cannot reuse the stock _build directory; use OUTPUT_DIRECTORY=_build_bms or another dedicated profile directory)
+endif
+endif
 
 ifeq ($(IS_52832),1)
 TARGETS          := nrf52832_xxaa
@@ -24,8 +45,18 @@ ifeq ($(IS_52832),1)
 $(OUTPUT_DIRECTORY)/$(TARGETS).out: LINKER_SCRIPT := ld_sd_52832.ld
 SD_PATH := $(SDK_ROOT)/components/softdevice/s132/hex/s132_nrf52_6.1.1_softdevice.hex
 else
+ifeq ($(BLE_BMS),1)
+$(OUTPUT_DIRECTORY)/$(TARGETS).out: LINKER_SCRIPT := ble_bms/ld_sd_52840_bms.ld
+else
 $(OUTPUT_DIRECTORY)/$(TARGETS).out: LINKER_SCRIPT := ld_sd_52840.ld
+endif
 SD_PATH := $(SDK_ROOT)/components/softdevice/s140/hex/s140_nrf52_6.1.1_softdevice.hex
+endif
+
+# BLE BMS central implementation; SDK remains unmodified.
+ifeq ($(BLE_BMS),1)
+SRC_FILES += ble_bms/ble_bms_radio.c ble_bms/ble_bms_fault.c $(SDK_ROOT)/components/ble/ble_db_discovery/ble_db_discovery.c
+INC_FOLDERS += ble_bms $(SDK_ROOT)/components/ble/ble_db_discovery
 endif
 
 # Source files
@@ -392,11 +423,28 @@ LIB_FILES += -lc -lnosys -lm
 # Default target - first one defined
 default: $(TARGETS)
 
+# Standalone spare-DK peripheral simulator; never included in radio images.
+ifneq ($(BMS_SIM_PROTOCOL),)
+ifneq ($(BLE_BMS),1)
+$(error BMS_SIM_PROTOCOL requires BLE_BMS=1)
+endif
+SRC_FILES := $(filter-out main.c ble_bms/ble_bms_radio.c,$(SRC_FILES))
+SRC_FILES += ble_bms/test_peripheral.c
+CFLAGS += -DBMS_SIM_PROTOCOL=$(BMS_SIM_PROTOCOL)
+endif
+
 TEMPLATE_PATH := $(SDK_ROOT)/components/toolchain/gcc
 
 include $(TEMPLATE_PATH)/Makefile.common
 
 $(foreach target, $(TARGETS), $(call define_target, $(target)))
+
+ifeq ($(BLE_BMS),1)
+# The SDK passes every .out prerequisite to ld as an input file. Recompile the
+# feature fault object on layout changes so the image relinks without passing
+# the linker script a second time as an ordinary input.
+$(OUTPUT_DIRECTORY)/$(TARGETS)/ble_bms_fault.c.o: ble_bms/ld_sd_52840_bms.ld
+endif
 
 .PHONY: flash flash_softdevice erase
 
